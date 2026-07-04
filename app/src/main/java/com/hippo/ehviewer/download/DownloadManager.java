@@ -28,12 +28,14 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.alibaba.fastjson.JSONObject;
 import com.hippo.ehviewer.Analytics;
 import com.hippo.ehviewer.EhDB;
 import com.hippo.ehviewer.Settings;
 import com.hippo.ehviewer.client.data.GalleryInfo;
 import com.hippo.ehviewer.dao.DownloadInfo;
 import com.hippo.ehviewer.dao.DownloadLabel;
+import com.hippo.ehviewer.dao.DownloadLabelMapping;
 import com.hippo.ehviewer.spider.SpiderDen;
 import com.hippo.ehviewer.spider.SpiderInfo;
 import com.hippo.ehviewer.spider.SpiderQueen;
@@ -50,14 +52,18 @@ import com.hippo.lib.yorozuya.collect.SparseIJArray;
 import com.hippo.lib.yorozuya.collect.SparseJLArray;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class DownloadManager implements SpiderQueen.OnSpiderListener {
 
@@ -65,6 +71,8 @@ public class DownloadManager implements SpiderQueen.OnSpiderListener {
 
     public static final String DOWNLOAD_INFO_FILENAME = ".ehviewer";
     public static final String DOWNLOAD_INFO_HEADER = "gid,token,title,title_jpn,thumb,category,posted,uploader,rating,rated,simple_lang,simple_tags,thumb_width,thumb_height,span_size,span_index,span_group_index,favorite_slot,favorite_name,pages";
+    public static final String DOWNLOAD_LABELS_MAPPING_FILE = "download-labels-mapping.json";
+    public static final int MAPPING_VERSION = 1;
 
     private final Context mContext;
 
@@ -262,6 +270,179 @@ public class DownloadManager implements SpiderQueen.OnSpiderListener {
 
     public List<GalleryInfo> getDownloadInfoList() {
         return new ArrayList<>(mAllInfoList);
+    }
+
+    @NonNull
+    static DownloadLabelMapping buildLabelMapping(@NonNull List<DownloadInfo> downloadInfos) {
+        DownloadLabelMapping mapping = new DownloadLabelMapping();
+        mapping.version = MAPPING_VERSION;
+        mapping.exportTime = System.currentTimeMillis();
+        for (DownloadInfo info : downloadInfos) {
+            mapping.labels.put(info.gid, info.label);
+        }
+        return mapping;
+    }
+
+    public boolean exportLabelsToFile(@NonNull UniFile targetDir) {
+        if (!targetDir.isDirectory()) {
+            return false;
+        }
+
+        UniFile existing = targetDir.findFile(DOWNLOAD_LABELS_MAPPING_FILE);
+        if (existing != null) {
+            existing.delete();
+        }
+
+        UniFile mappingFile = targetDir.createFile(DOWNLOAD_LABELS_MAPPING_FILE);
+        if (mappingFile == null) {
+            return false;
+        }
+
+        DownloadLabelMapping mapping = buildLabelMapping(EhDB.getAllDownloadInfo());
+        JSONObject json = mapping.toJson();
+        try (OutputStream os = mappingFile.openOutputStream()) {
+            os.write(json.toJSONString().getBytes(StandardCharsets.UTF_8));
+            return true;
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to export label mapping", e);
+            return false;
+        }
+    }
+
+    public synchronized int applyLabelUpdatesInSyncThread(@NonNull Map<Long, String> gidToLabel,
+                                                           @NonNull Set<String> createdLabels) {
+        for (String label : createdLabels) {
+            addLabelInSyncThread(label);
+        }
+
+        Set<LinkedList<DownloadInfo>> touchedLists = new LinkedHashSet<>();
+        List<DownloadInfo> changedInfos = new ArrayList<>();
+
+        for (Map.Entry<Long, String> entry : gidToLabel.entrySet()) {
+            DownloadInfo info = mAllInfoMap.get(entry.getKey());
+            if (info == null) {
+                // Try to load from DB and add to in-memory state.
+                // This handles the case where downloads were restored from DB
+                // but the DownloadManager hasn't been fully reloaded yet.
+                info = EhDB.getDownloadInfo(entry.getKey());
+                if (info != null) {
+                    mAllInfoMap.put(info.gid, info);
+                    mAllInfoList.addFirst(info);
+                    LinkedList<DownloadInfo> list = getInfoListForLabel(info.label);
+                    if (list == null) {
+                        list = new LinkedList<>();
+                        mMap.put(info.label, list);
+                    }
+                    list.addFirst(info);
+                } else {
+                    continue;
+                }
+            }
+
+            String oldLabel = info.label;
+            String newLabel = entry.getValue();
+            if (ObjectUtils.equal(oldLabel, newLabel)) {
+                continue;
+            }
+
+            LinkedList<DownloadInfo> oldList = getInfoListForLabel(oldLabel);
+            LinkedList<DownloadInfo> newList = getInfoListForLabel(newLabel);
+            if (newList == null) {
+                // Repair in-memory map if label exists in DB/list but has no bucket in runtime.
+                mMap.put(newLabel, new LinkedList<>());
+                newList = mMap.get(newLabel);
+            }
+            if (oldList == null) {
+                oldList = findOwnerList(info);
+            }
+            if (newList == null) {
+                continue;
+            }
+
+            if (oldList != null) {
+                oldList.remove(info);
+            } else {
+                removeFromAnyList(info);
+            }
+            if (!newList.contains(info)) {
+                newList.add(info);
+            }
+            info.label = newLabel;
+
+            touchedLists.add(oldList);
+            touchedLists.add(newList);
+            changedInfos.add(info);
+
+            mLabelCountMap.put(oldLabel, Math.max(0L, getLabelCount(oldLabel) - 1L));
+            mLabelCountMap.put(newLabel, getLabelCount(newLabel) + 1L);
+        }
+
+        for (LinkedList<DownloadInfo> list : touchedLists) {
+            Collections.sort(list, DATE_DESC_COMPARATOR);
+        }
+
+        if (!createdLabels.isEmpty()) {
+            for (DownloadInfoListener l : mDownloadInfoListeners) {
+                l.onUpdateLabels();
+            }
+        }
+        for (DownloadInfo info : changedInfos) {
+            LinkedList<DownloadInfo> list = getInfoListForLabel(info.label);
+            if (list != null) {
+                for (DownloadInfoListener l : mDownloadInfoListeners) {
+                    l.onUpdate(info, list, mWaitList);
+                }
+            }
+        }
+
+        return changedInfos.size();
+    }
+
+    @Nullable
+    private LinkedList<DownloadInfo> findOwnerList(@NonNull DownloadInfo target) {
+        if (mDefaultInfoList.contains(target)) {
+            return mDefaultInfoList;
+        }
+        for (LinkedList<DownloadInfo> list : mMap.values()) {
+            if (list.contains(target)) {
+                return list;
+            }
+        }
+        return null;
+    }
+
+    private void removeFromAnyList(@NonNull DownloadInfo target) {
+        mDefaultInfoList.remove(target);
+        for (LinkedList<DownloadInfo> list : mMap.values()) {
+            list.remove(target);
+        }
+    }
+
+    public synchronized int removeEmptyLabelsInSyncThread() {
+        int removedCount = 0;
+
+        for (Iterator<DownloadLabel> iterator = mLabelList.iterator(); iterator.hasNext(); ) {
+            DownloadLabel raw = iterator.next();
+            String label = raw.getLabel();
+            LinkedList<DownloadInfo> list = mMap.get(label);
+            if (list != null && !list.isEmpty()) {
+                continue;
+            }
+
+            iterator.remove();
+            mMap.remove(label);
+            mLabelCountMap.remove(label);
+            EhDB.removeDownloadLabel(raw);
+            removedCount++;
+        }
+
+        if (removedCount > 0) {
+            for (DownloadInfoListener l : mDownloadInfoListeners) {
+                l.onUpdateLabels();
+            }
+        }
+
+        return removedCount;
     }
 
     @Nullable

@@ -25,6 +25,8 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteException;
 import android.database.sqlite.SQLiteOpenHelper;
+
+import org.greenrobot.greendao.database.Database;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -75,7 +77,9 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public class EhDB {
 
@@ -466,6 +470,46 @@ public class EhDB {
         } else {
             // Insert
             dao.insert(downloadInfo);
+        }
+    }
+
+    @Nullable
+    public static synchronized DownloadInfo getDownloadInfo(long gid) {
+        return sDaoSession.getDownloadsDao().load(gid);
+    }
+
+    public static synchronized void updateDownloadInfoLabel(long gid, @Nullable String label) {
+        DownloadsDao dao = sDaoSession.getDownloadsDao();
+        DownloadInfo info = dao.load(gid);
+        if (info == null) {
+            return;
+        }
+        info.setLabel(label);
+        dao.update(info);
+    }
+
+    @Nullable
+    public static synchronized DownloadLabel ensureDownloadLabel(@Nullable String label) {
+        if (label == null || label.isEmpty()) {
+            return null;
+        }
+        return addDownloadLabel(label);
+    }
+
+    public static synchronized void applyDownloadLabelMapping(@NonNull Map<Long, String> updates,
+                                                              @NonNull Set<String> labelsToEnsure) {
+        Database database = sDaoSession.getDatabase();
+        database.beginTransaction();
+        try {
+            for (String label : labelsToEnsure) {
+                ensureDownloadLabel(label);
+            }
+            for (Map.Entry<Long, String> entry : updates.entrySet()) {
+                updateDownloadInfoLabel(entry.getKey(), entry.getValue());
+            }
+            database.setTransactionSuccessful();
+        } finally {
+            database.endTransaction();
         }
     }
 

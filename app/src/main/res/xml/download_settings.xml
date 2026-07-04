@@ -106,6 +106,20 @@
         app:allowDividerAbove="true"
         app:iconSpaceReserved="false" />
 
+    <com.hippo.ehviewer.preference.ExportLabelMappingPreference
+        android:key="export_label_mapping"
+        android:summary="@string/settings_download_export_label_mapping_summary"
+        android:title="@string/settings_download_export_label_mapping"
+        app:allowDividerAbove="true"
+        app:iconSpaceReserved="false" />
+
+    <com.hippo.ehviewer.preference.RestoreLabelPreference
+        android:key="restore_download_labels"
+        android:summary="@string/settings_download_restore_labels_summary"
+        android:title="@string/settings_download_restore_labels"
+        app:allowDividerAbove="true"
+        app:iconSpaceReserved="false" />
+
     <com.hippo.ehviewer.preference.CleanRedundancyPreference
         android:key="clean_redundancy"
         android:summary="@string/settings_download_clean_redundancy_summary"

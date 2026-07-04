@@ -24,6 +24,7 @@ import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
@@ -57,6 +58,8 @@ import java.util.Locale;
 public class DownloadFragment extends PreferenceFragmentCompat implements
         Preference.OnPreferenceChangeListener,
         Preference.OnPreferenceClickListener {
+
+    private static final String TAG = DownloadFragment.class.getSimpleName();
 
     public static final int REQUEST_CODE_PICK_IMAGE_DIR = 0;
     public static final int REQUEST_CODE_PICK_IMAGE_DIR_L = 1;
@@ -247,6 +250,14 @@ public class DownloadFragment extends PreferenceFragmentCompat implements
             for (GalleryInfo gi : list) {
                 os.write(gi.toCSV().getBytes(StandardCharsets.UTF_8));
             }
+
+            // Export label mapping alongside CSV backup so labels can be restored later.
+            DownloadManager manager = EhApplication.getDownloadManager(requireActivity());
+            boolean exportedLabels = manager.exportLabelsToFile(dir);
+            if (!exportedLabels) {
+                Log.w(TAG, "Exported download CSV, but failed to export label mapping file");
+            }
+
             Toast.makeText(getActivity(), getString(R.string.settings_download_export_succeed, file.getUri().toString()), Toast.LENGTH_SHORT).show();
         } catch (IOException e) {
             Toast.makeText(getActivity(), R.string.settings_download_export_failed, Toast.LENGTH_SHORT).show();
